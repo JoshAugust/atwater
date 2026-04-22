@@ -19,3 +19,16 @@ pandas>=2.2
 #   pip install pyiqa torch torchvision clip-by-openai Pillow
 sqlite-vec>=0.1.6
 networkx>=3.3
+
+# ---------------------------------------------------------------------------
+# Phase 8: Monitoring & Observability
+# ---------------------------------------------------------------------------
+
+# Required for Rich-powered dashboard fallback (strongly recommended)
+rich>=13.0
+
+# Optional: Full Textual TUI dashboard (install for the best live experience)
+# textual>=0.80
+
+# Optional: matplotlib charts in analyze_run.py
+# matplotlib>=3.8
