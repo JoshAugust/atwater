@@ -1,0 +1,160 @@
+# OpenFang 0.6 — Hand Manifest for Atwater
+# https://github.com/RightNow-AI/openfang
+#
+# A "Hand" is an autonomous capability package in OpenFang.
+# This manifest defines the Atwater cognitive architecture as a Hand:
+# a statistical optimization loop with LLM agents, Optuna-driven search,
+# and a tiered knowledge base.
+
+[hand]
+name        = "atwater"
+version     = "0.1.0"
+description = """
+Atwater is a cognitive agent architecture for continuous, statistically-grounded
+content optimization. It runs a multi-agent evolution loop:
+
+  Director → Creator → Grader → DiversityGuard → (Consolidator every N cycles)
+
+- Director: Uses Optuna (TPE sampler) to select the next parameter combination.
+- Creator: Generates content for the selected hypothesis.
+- Grader: Scores output across rubric dimensions; reports back to Optuna.
+- DiversityGuard: Monitors asset concentration; triggers forced exploration.
+- Consolidator: Every 50 cycles, compacts the knowledge base (promote/merge/archive).
+
+All agents communicate via a scoped shared-state SQLite store and a tiered
+knowledge base (Rules → Patterns → Observations).
+"""
+
+author      = "Atwater Team"
+license     = "MIT"
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+[hand.entrypoint]
+# The main production loop runner.
+command = "python -m atwater.main"
+args    = ["--config", "config/settings.json"]
+
+# ---------------------------------------------------------------------------
+# Required tools / capabilities
+# ---------------------------------------------------------------------------
+
+[hand.tools]
+
+# LM Studio — local LLM inference (OpenAI-compatible API)
+[hand.tools.lm_studio]
+type        = "http_api"
+base_url    = "http://localhost:1234/v1"
+description = "Local LLM inference via LM Studio (OpenAI-compatible endpoint)."
+required    = true
+
+# SQLite — shared state, knowledge base, Optuna storage
+[hand.tools.sqlite]
+type        = "local_fs"
+paths       = ["data/state.db", "data/knowledge.db", "data/trials.db"]
+description = "SQLite databases for shared state, knowledge base, and Optuna trials."
+required    = true
+
+# File system — output artifacts (generated content)
+[hand.tools.output_fs]
+type        = "local_fs"
+paths       = ["data/outputs/"]
+description = "Directory for generated content artifacts."
+required    = true
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+
+[hand.schedule]
+# Run one full evolution cycle every 5 minutes by default.
+# Set cycles_per_run > 1 to batch multiple cycles per scheduled invocation.
+mode           = "interval"
+interval_secs  = 300
+cycles_per_run = 1
+
+# Consolidation override: even if the scheduler fires, the consolidator
+# only actually runs inside the FlowController when cycle_number % 50 == 0.
+consolidation_interval = 50
+
+# ---------------------------------------------------------------------------
+# Dashboard metrics
+# Exposed to the OpenFang dashboard UI for at-a-glance system health.
+# ---------------------------------------------------------------------------
+
+[hand.dashboard]
+
+[[hand.dashboard.metrics]]
+name        = "cycle_count"
+label       = "Cycles Run"
+description = "Total number of evolution cycles completed since start."
+source      = "state_db"
+query       = "SELECT value FROM shared_state WHERE key = 'cycle_count'"
+type        = "counter"
+
+[[hand.dashboard.metrics]]
+name        = "best_score"
+label       = "Best Score"
+description = "Highest grader score reported to Optuna across all trials."
+source      = "optuna_db"
+query       = "SELECT MAX(value) FROM trials WHERE state = 'COMPLETE'"
+type        = "gauge"
+format      = ".4f"
+
+[[hand.dashboard.metrics]]
+name        = "kb_size"
+label       = "Knowledge Base Entries"
+description = "Total active knowledge entries (Rules + Patterns + Observations)."
+source      = "knowledge_db"
+query       = "SELECT COUNT(*) FROM knowledge_entries WHERE archived = 0"
+type        = "gauge"
+
+[[hand.dashboard.metrics]]
+name        = "active_trials"
+label       = "Active Trials"
+description = "Number of Optuna trials in RUNNING state (should usually be 0 or 1)."
+source      = "optuna_db"
+query       = "SELECT COUNT(*) FROM trials WHERE state = 'RUNNING'"
+type        = "gauge"
+
+[[hand.dashboard.metrics]]
+name        = "kb_rules"
+label       = "KB Rules"
+description = "Count of Rule-tier knowledge entries (most trusted invariants)."
+source      = "knowledge_db"
+query       = "SELECT COUNT(*) FROM knowledge_entries WHERE tier = 'rule' AND archived = 0"
+type        = "gauge"
+
+[[hand.dashboard.metrics]]
+name        = "diversity_alerts"
+label       = "Diversity Alerts"
+description = "Number of diversity alerts raised in the last cycle."
+source      = "state_db"
+query       = "SELECT value FROM shared_state WHERE key = 'diversity_alert_count'"
+type        = "gauge"
+
+# ---------------------------------------------------------------------------
+# Environment requirements
+# ---------------------------------------------------------------------------
+
+[hand.env]
+ATWATER_CONFIG     = { description = "Path to settings.json. Defaults to config/settings.json.", required = false }
+ATWATER_LOG_LEVEL  = { description = "Logging level: DEBUG | INFO | WARNING | ERROR.", required = false, default = "INFO" }
+LM_STUDIO_URL      = { description = "Override LM Studio base URL.", required = false, default = "http://localhost:1234/v1" }
+LM_STUDIO_MODEL    = { description = "Override model name (auto-detected if not set).", required = false }
+
+# ---------------------------------------------------------------------------
+# Python dependencies
+# ---------------------------------------------------------------------------
+
+[hand.dependencies]
+python  = ">=3.11"
+# Core deps — keep lean; stdlib preferred.
+# optuna is required for the statistical layer.
+packages = [
+  "optuna>=3.6",
+  "numpy>=1.26",        # Used by Optuna samplers internally
+]
+# Note: LM Studio HTTP calls use urllib.request (stdlib). No httpx/requests needed.
