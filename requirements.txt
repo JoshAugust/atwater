@@ -18,3 +18,4 @@ pandas>=2.2
 # To install all optional evaluation deps at once:
 #   pip install pyiqa torch torchvision clip-by-openai Pillow
 sqlite-vec>=0.1.6
+networkx>=3.3

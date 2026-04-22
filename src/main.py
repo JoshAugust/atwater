@@ -9,6 +9,9 @@ Usage
 -----
     python -m src.main --cycles 20 --study-name my-run --verbose
     python -m src.main --cycles 50 --config config/production.json
+    python -m src.main --validate                  # health check, then exit
+    python -m src.main --dry-run --cycles 5        # full cycle, no DB writes
+    python -m src.main --resume --cycles 20        # resume from checkpoint
     python src/main.py --help
 """
 
@@ -112,6 +115,47 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Run consolidation every N cycles.",
     )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=Path("checkpoints"),
+        metavar="PATH",
+        help="Directory to store cycle checkpoints.",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Auto-checkpoint every N cycles.",
+    )
+    # -----------------------------------------------------------------------
+    # Phase 7 flags
+    # -----------------------------------------------------------------------
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Run full cycles but skip all database writes. "
+            "Useful for testing without side effects."
+        ),
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        default=False,
+        help="Run health checks, print a status report, and exit.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Load the most recent checkpoint and resume from that cycle number. "
+            "Ignored if no checkpoint exists (starts from cycle 1)."
+        ),
+    )
     return parser
 
 
@@ -159,6 +203,8 @@ def _progress_line(
     consolidated: bool,
     errors: dict[str, str],
     elapsed: float,
+    dry_run: bool = False,
+    checkpointed: bool = False,
 ) -> str:
     bar_width = 20
     filled = int(bar_width * cycle / total)
@@ -166,8 +212,12 @@ def _progress_line(
 
     score_str = f"{score:.4f}" if score is not None else "  N/A "
     flags: list[str] = []
+    if dry_run:
+        flags.append("DRY-RUN")
     if consolidated:
         flags.append("CONSOLIDATED")
+    if checkpointed:
+        flags.append("CHECKPOINTED")
     if alerts:
         flags.append(f"{alerts} alert(s)")
     if errors:
@@ -187,12 +237,13 @@ def _print_summary(
     kb: Any,              # KnowledgeBase
     total_elapsed: float,
     verbose: bool,
+    dry_run: bool = False,
 ) -> None:
     """Print a structured post-run summary to stdout."""
     from src.optimization import get_importances, get_best_params, get_score_trend
 
     print("\n" + "=" * 60)
-    print("  ATWATER — Run Summary")
+    print(f"  ATWATER — Run Summary{'  [DRY-RUN]' if dry_run else ''}")
     print("=" * 60)
 
     # Basic stats
@@ -209,6 +260,8 @@ def _print_summary(
     print(f"  KB writes    : {total_kb_writes}")
     print(f"  Div. alerts  : {total_alerts}")
     print(f"  Wall time    : {total_elapsed:.1f}s")
+    if dry_run:
+        print(f"  Mode         : DRY-RUN (no DB writes)")
 
     # Score trend
     if scores:
@@ -261,6 +314,40 @@ def _print_summary(
 
 
 # ---------------------------------------------------------------------------
+# Health check runner (--validate mode)
+# ---------------------------------------------------------------------------
+
+def _run_validate(
+    state_db: Path,
+    knowledge_db: Path,
+    optuna_db: Path,
+    lm_studio_url: str = "http://localhost:1234/v1",
+) -> int:
+    """
+    Run all health checks, print a report, and return exit code.
+
+    Returns 0 if all checks pass, 1 if any check fails.
+    """
+    from src.resilience.health_check import HealthChecker
+
+    print("\nAtwater — Health Check\n")
+    checker = HealthChecker(lm_studio_url=lm_studio_url)
+
+    # Convert optuna_db Path to SQLite file path for disk check
+    db_paths = [state_db, knowledge_db]
+    # Optuna db may be "sqlite:///path/to/file.db" or a plain path
+    optuna_path_str = str(optuna_db).replace("sqlite:///", "")
+    db_paths.append(Path(optuna_path_str))
+
+    results = checker.check_all(db_paths=db_paths)
+    print(checker.report(results))
+    print()
+
+    all_healthy = all(r.healthy for r in results)
+    return 0 if all_healthy else 1
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -290,12 +377,56 @@ def main(argv: list[str] | None = None) -> int:
     consolidation_interval = config.get(
         "consolidation_interval", args.consolidation_interval
     )
+    dry_run: bool = args.dry_run
+    checkpoint_dir: Path = args.checkpoint_dir
+    checkpoint_every: int = args.checkpoint_every
 
+    # ------------------------------------------------------------------
+    # --validate mode: run health checks and exit
+    # ------------------------------------------------------------------
+    if args.validate:
+        return _run_validate(
+            state_db=state_db,
+            knowledge_db=knowledge_db,
+            optuna_db=optuna_db,
+        )
+
+    # ------------------------------------------------------------------
+    # Resilience subsystems
+    # ------------------------------------------------------------------
+    from src.resilience.checkpointing import CheckpointManager
+    from src.resilience.circuit_breaker import CircuitBreaker, CircuitOpenError
+    from src.resilience.graceful_shutdown import ShutdownHandler
+
+    checkpoint_mgr = CheckpointManager(
+        checkpoint_dir=checkpoint_dir,
+        save_every=checkpoint_every,
+        keep_last=5,
+    )
+
+    circuit_breaker = CircuitBreaker(
+        failure_threshold=5,
+        recovery_timeout=60,
+        half_open_max=2,
+    )
+
+    shutdown_handler = ShutdownHandler(exit_on_shutdown=False)
+    shutdown_handler.register()
+
+    # ------------------------------------------------------------------
+    # Print startup banner
+    # ------------------------------------------------------------------
     print(f"\nAtwater — starting {cycles} cycle(s)  [study={study_name!r}]")
     print(f"  state_db     : {state_db}")
     print(f"  knowledge_db : {knowledge_db}")
     print(f"  optuna_db    : {optuna_db}")
-    print(f"  consolidation: every {consolidation_interval} cycles\n")
+    print(f"  consolidation: every {consolidation_interval} cycles")
+    print(f"  checkpoints  : every {checkpoint_every} cycles → {checkpoint_dir}")
+    if dry_run:
+        print(f"  mode         : DRY-RUN (no DB writes)")
+    if args.resume:
+        print(f"  resume       : enabled")
+    print()
 
     # ------------------------------------------------------------------
     # Initialise subsystems
@@ -346,20 +477,85 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # ------------------------------------------------------------------
+    # Register shutdown callback: save checkpoint on SIGTERM/SIGINT
+    # ------------------------------------------------------------------
+    _last_result_ref: list[Any] = []  # mutable container for closure
+
+    def _on_shutdown() -> None:
+        log.warning("Shutdown requested — saving emergency checkpoint")
+        if _last_result_ref:
+            last = _last_result_ref[-1]
+            checkpoint_mgr.save_checkpoint(
+                cycle_number=last.cycle_number,
+                state={"last_score": last.score, "params": last.params_used},
+                study_name=study_name,
+                kb_stats={},
+                force=True,
+            )
+        try:
+            shared_state.close()
+            knowledge_base.close()
+        except Exception:
+            pass
+
+    shutdown_handler.on_shutdown(_on_shutdown)
+
+    # ------------------------------------------------------------------
+    # --resume: load checkpoint and determine start cycle
+    # ------------------------------------------------------------------
+    start_cycle = 1
+    if args.resume:
+        checkpoint = checkpoint_mgr.load_checkpoint()
+        if checkpoint:
+            start_cycle = checkpoint.cycle_number + 1
+            print(
+                f"  Resuming from cycle {start_cycle} "
+                f"(checkpoint at cycle {checkpoint.cycle_number})\n"
+            )
+        else:
+            print("  No checkpoint found — starting from cycle 1\n")
+
+    # ------------------------------------------------------------------
     # Run cycles
     # ------------------------------------------------------------------
     run_start = time.perf_counter()
     results: list[Any] = []
 
-    print(f"  Running {cycles} cycles...\n")
+    # Compute effective total for the progress bar
+    remaining_cycles = cycles - (start_cycle - 1)
+    print(f"  Running {remaining_cycles} cycle(s) (start={start_cycle})...\n")
 
-    for i in range(1, cycles + 1):
+    for i in range(start_cycle, start_cycle + remaining_cycles):
+        # --- Check for shutdown signal before each cycle ---
+        if shutdown_handler.is_shutdown_requested():
+            print(f"\n  Shutdown requested at cycle {i} — stopping.", file=sys.stderr)
+            break
+
         cycle_start = time.perf_counter()
         try:
-            result = flow.run_cycle(cycle_number=i)
+            # Wrap the cycle in the circuit breaker to protect against
+            # cascading LLM failures.
+            def _run_cycle_inner(cycle_number: int) -> Any:
+                return flow.run_cycle(cycle_number=cycle_number)
+
+            try:
+                result = circuit_breaker.call(_run_cycle_inner, i)
+            except CircuitOpenError as coe:
+                log.error("Circuit breaker OPEN at cycle %d: %s", i, coe)
+                from src.orchestrator.flow_controller import CycleResult
+                result = CycleResult(
+                    cycle_number=i,
+                    params_used={},
+                    score=None,
+                    knowledge_writes=[],
+                    diversity_alerts=[],
+                    consolidated=False,
+                    success=False,
+                    errors={"circuit_breaker": str(coe)},
+                )
+
         except Exception as exc:
             log.error("Unhandled exception in cycle %d: %s", i, exc, exc_info=True)
-            # Create a failure sentinel so summary still works
             from src.orchestrator.flow_controller import CycleResult
             result = CycleResult(
                 cycle_number=i,
@@ -373,18 +569,43 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         results.append(result)
+        _last_result_ref.append(result)  # keep most recent for shutdown callback
+        if len(_last_result_ref) > 1:
+            _last_result_ref.pop(0)
+
         cycle_elapsed = time.perf_counter() - cycle_start
         total_elapsed = time.perf_counter() - run_start
 
+        # --- Auto-checkpoint ---
+        saved_path = None
+        if not dry_run:
+            kb_stats: dict[str, Any] = {}
+            try:
+                kb_stats = {"repr": repr(knowledge_base)}
+            except Exception:
+                pass
+            saved_path = checkpoint_mgr.save_checkpoint(
+                cycle_number=i,
+                state={
+                    "last_score": result.score,
+                    "params": result.params_used,
+                    "errors": result.errors,
+                },
+                study_name=study_name,
+                kb_stats=kb_stats,
+            )
+
         line = _progress_line(
-            cycle=i,
-            total=cycles,
+            cycle=i - start_cycle + 1,
+            total=remaining_cycles,
             score=result.score,
             knowledge_writes=len(result.knowledge_writes),
             alerts=len(result.diversity_alerts),
             consolidated=result.consolidated,
             errors=result.errors,
             elapsed=total_elapsed,
+            dry_run=dry_run,
+            checkpointed=saved_path is not None,
         )
         print(line)
 
@@ -399,7 +620,23 @@ def main(argv: list[str] | None = None) -> int:
         kb=knowledge_base,
         total_elapsed=total_elapsed,
         verbose=args.verbose,
+        dry_run=dry_run,
     )
+
+    # ------------------------------------------------------------------
+    # Final checkpoint on clean exit
+    # ------------------------------------------------------------------
+    if results and not dry_run:
+        checkpoint_mgr.save_checkpoint(
+            cycle_number=results[-1].cycle_number,
+            state={
+                "last_score": results[-1].score,
+                "params": results[-1].params_used,
+            },
+            study_name=study_name,
+            kb_stats={},
+            force=True,
+        )
 
     # ------------------------------------------------------------------
     # Clean shutdown
@@ -417,6 +654,14 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("KnowledgeBase close error: %s", exc)
 
     log.debug("Shutdown complete")
+    cb_stats = circuit_breaker.get_stats()
+    if cb_stats["total_trips"] > 0:
+        print(
+            f"  [circuit-breaker] tripped {cb_stats['total_trips']} time(s) "
+            f"({cb_stats['total_failures']} failures across {cb_stats['total_calls']} calls)",
+            file=sys.stderr,
+        )
+
     return 0
 
 
