@@ -8,7 +8,16 @@ Key design decisions:
   first loaded model is used. Cached after first call.
 - Retry: 3 attempts with exponential backoff (1s, 2s, 4s).
 - chat() → plain text completion (for generative roles).
-- chat_structured() → JSON-mode completion (for grader scoring, etc.).
+- chat_structured() → JSON-mode completion with schema enforcement.
+
+Schema enforcement (Phase 2B)
+------------------------------
+Small models (4-8B) produce invalid JSON 15-30% of the time without
+constrained generation. chat_structured() now:
+  1. Passes response_format containing a JSON Schema to the API.
+  2. Validates the parsed JSON against the schema after parsing.
+  3. Retries up to _SCHEMA_RETRY_ATTEMPTS times with an escalating prompt
+     if parsing or schema validation fails.
 """
 
 from __future__ import annotations
@@ -25,9 +34,24 @@ logger = logging.getLogger(__name__)
 _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 1.0  # seconds; doubles each attempt
 
+# Extra retry attempts dedicated to schema validation failures.
+_SCHEMA_RETRY_ATTEMPTS = 3
+
 
 class LMStudioClientError(Exception):
     """Raised when LM Studio returns an unexpected response."""
+
+
+class SchemaValidationError(LMStudioClientError):
+    """Raised when the model's response fails schema validation after all retries."""
+
+    def __init__(self, errors: list[str], raw_response: str) -> None:
+        self.errors = errors
+        self.raw_response = raw_response
+        super().__init__(
+            f"Response failed schema validation ({len(errors)} error(s)): "
+            + "; ".join(errors[:5])
+        )
 
 
 class LMStudioClient:
@@ -96,19 +120,34 @@ class LMStudioClient:
     def chat_structured(
         self,
         messages: list[dict[str, str]],
-        response_format: dict[str, Any],
+        response_format: dict[str, Any] | None = None,
+        schema: dict[str, Any] | None = None,
         temperature: float = 0.3,
         max_tokens: int = 2048,
     ) -> dict[str, Any]:
         """
-        Send a structured (JSON-mode) chat completion and return parsed dict.
+        Send a structured (JSON-mode) chat completion and return a validated dict.
+
+        Schema enforcement flow
+        -----------------------
+        1. Build the response_format payload (wrapping ``schema`` if provided).
+        2. POST to the API with the schema in the payload so LM Studio uses
+           constrained generation.
+        3. Parse the JSON response.
+        4. Validate against ``schema`` using the internal validator.
+        5. On parse or validation failure: retry up to _SCHEMA_RETRY_ATTEMPTS
+           times, prepending a stricter instruction to the messages.
 
         Parameters
         ----------
         messages : list[dict]
             OpenAI-format message list.
-        response_format : dict
-            OpenAI response_format spec, e.g. ``{"type": "json_object"}``.
+        response_format : dict | None
+            Full OpenAI response_format spec.  If provided, used as-is.
+            Mutually exclusive with ``schema``.
+        schema : dict | None
+            A JSON Schema dict.  The method wraps it into the correct
+            response_format payload automatically.  Use this for convenience.
         temperature : float
             Lower temperature recommended for reliable JSON output.
         max_tokens : int
@@ -117,23 +156,118 @@ class LMStudioClient:
         Returns
         -------
         dict
-            Parsed JSON from the model's reply.
+            Parsed and schema-validated JSON from the model's reply.
 
         Raises
         ------
         LMStudioClientError
-            On HTTP errors or if the model returns non-JSON content.
+            On HTTP errors or if the model returns non-JSON content after retries.
+        SchemaValidationError
+            If all retries are exhausted and the response still fails schema
+            validation.
         """
-        payload = self._build_payload(messages, temperature, max_tokens)
-        payload["response_format"] = response_format
-        response = self._post_with_retry("/chat/completions", payload)
-        raw_text = self._extract_text(response)
-        try:
-            return json.loads(raw_text)
-        except json.JSONDecodeError as exc:
+        if schema is not None and response_format is not None:
+            raise ValueError(
+                "Provide either 'schema' or 'response_format', not both."
+            )
+
+        # Build the response_format payload.
+        resolved_format: dict[str, Any] | None = None
+        if schema is not None:
+            resolved_format = self._build_json_schema_format(schema)
+        elif response_format is not None:
+            resolved_format = response_format
+        else:
+            # Fallback: plain JSON object mode (no schema enforcement).
+            resolved_format = {"type": "json_object"}
+
+        # Attempt structured call with schema-retry loop.
+        last_parse_error: Exception | None = None
+        last_validation_errors: list[str] = []
+        last_raw: str = ""
+        active_messages = list(messages)
+
+        for attempt in range(_SCHEMA_RETRY_ATTEMPTS):
+            if attempt > 0:
+                # Escalate with a stricter prepended instruction.
+                schema_text = json.dumps(schema or {}, indent=2)
+                strict_instruction: dict[str, str] = {
+                    "role": "user",
+                    "content": (
+                        f"IMPORTANT: You MUST respond with valid JSON that exactly matches "
+                        f"this schema. No extra text, no markdown fences, no explanations — "
+                        f"only the JSON object.\n\nRequired schema:\n{schema_text}"
+                    ),
+                }
+                # Insert at the front (after any system message) so it's prominent.
+                insert_pos = 1 if active_messages and active_messages[0]["role"] == "system" else 0
+                active_messages = (
+                    active_messages[:insert_pos]
+                    + [strict_instruction]
+                    + active_messages[insert_pos:]
+                )
+                logger.warning(
+                    "chat_structured: schema retry %d/%d (prev errors: %s)",
+                    attempt + 1,
+                    _SCHEMA_RETRY_ATTEMPTS,
+                    last_validation_errors[:3] or str(last_parse_error),
+                )
+
+            payload = self._build_payload(active_messages, temperature, max_tokens)
+            if resolved_format:
+                payload["response_format"] = resolved_format
+
+            try:
+                response = self._post_with_retry("/chat/completions", payload)
+            except LMStudioClientError:
+                raise  # HTTP errors are not schema errors; re-raise immediately.
+
+            last_raw = self._extract_text(response)
+
+            # --- Parse JSON ---
+            try:
+                parsed = json.loads(last_raw)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "chat_structured attempt %d: JSON parse failed — %s | raw=%s",
+                    attempt + 1,
+                    exc,
+                    last_raw[:200],
+                )
+                last_parse_error = exc
+                continue  # Retry
+
+            # --- Schema validation ---
+            if schema is not None:
+                valid, validation_errors = self._validate_against_schema(parsed, schema)
+                if not valid:
+                    last_validation_errors = validation_errors
+                    logger.warning(
+                        "chat_structured attempt %d: schema validation failed — %s",
+                        attempt + 1,
+                        validation_errors[:3],
+                    )
+                    continue  # Retry
+
+            # Success
+            logger.debug(
+                "chat_structured: success on attempt %d/%d",
+                attempt + 1,
+                _SCHEMA_RETRY_ATTEMPTS,
+            )
+            return parsed
+
+        # All retries exhausted.
+        if last_parse_error is not None:
             raise LMStudioClientError(
-                f"Model returned non-JSON output: {raw_text[:200]}"
-            ) from exc
+                f"Model returned non-JSON output after {_SCHEMA_RETRY_ATTEMPTS} attempts: "
+                f"{last_raw[:300]}"
+            ) from last_parse_error
+
+        raise SchemaValidationError(
+            errors=last_validation_errors,
+            raw_response=last_raw,
+        )
 
     def list_models(self) -> list[str]:
         """
@@ -152,6 +286,51 @@ class LMStudioClient:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_against_schema(
+        data: Any, schema: dict[str, Any]
+    ) -> tuple[bool, list[str]]:
+        """
+        Validate ``data`` against ``schema`` using the internal validator.
+
+        Deliberately lazy-imports to avoid circular imports at module load time,
+        and to remain functional even if the schemas package is missing (falls
+        back to no-op validation with a warning).
+        """
+        try:
+            from src.schemas.validation import validate_output  # type: ignore[import]
+            return validate_output(data, schema)
+        except ImportError:
+            logger.warning(
+                "src.schemas.validation not found — schema validation skipped. "
+                "Install the schemas package to enable enforcement."
+            )
+            return True, []
+
+    @staticmethod
+    def _build_json_schema_format(schema: dict[str, Any], name: str = "agent_output") -> dict[str, Any]:
+        """
+        Wrap a JSON Schema dict into the LM Studio response_format payload.
+
+        Format expected by LM Studio / OpenAI structured outputs:
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "<identifier>",
+                    "schema": { ... },
+                    "strict": true
+                }
+            }
+        """
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": name,
+                "schema": schema,
+                "strict": True,
+            },
+        }
 
     def _resolve_model(self) -> str:
         """Return the configured model, auto-detecting if needed."""

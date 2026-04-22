@@ -21,6 +21,20 @@ Environment variable overrides (all optional):
     ATWATER_EXPLORATION_RATIO    → exploration_ratio
     ATWATER_TOKEN_BUDGET         → token_budget
     ATWATER_LOG_LEVEL            → log_level
+
+Per-agent model configuration (Phase 2C)
+-----------------------------------------
+Add an ``agent_configs`` dict to settings.json to override per-agent model
+settings. Only the fields you want to change are required:
+
+    {
+      "agent_configs": {
+        "director": { "thinking_mode": true, "temperature": 0.1 },
+        "grader":   { "model_name": "qwen3-4b-q8_0", "temperature": 0.0 }
+      }
+    }
+
+See src/config/agent_configs.py for the full schema and defaults.
 """
 
 from __future__ import annotations
@@ -31,6 +45,11 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Import agent_configs module so overrides can be applied after load.
+# Use a lazy import inside load_settings() to avoid circular imports at
+# module level — agent_configs is in src/ which may import from config/.
+_agent_configs_module = None  # populated on first load_settings() call
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +128,26 @@ class Settings:
     # Knowledge base
     knowledge_min_confidence: float = 0.30
 
+    # Per-agent model configuration (Phase 2C)
+    # Keys are agent role strings (e.g. "director", "grader").
+    # Values are dicts with fields matching AgentModelConfig (all optional):
+    #   model_name, quantization, thinking_mode, temperature, max_tokens
+    # At load time these overrides are applied to src.config.agent_configs.
+    # Compile-time defaults live in src/config/agent_configs.py.
+    agent_configs: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialise settings to a plain dict (JSON-safe)."""
-        return asdict(self)
+        d = asdict(self)
+        # agent_configs values are plain dicts (not dataclasses), so asdict
+        # handles them correctly; but guard in case they're AgentModelConfig
+        # instances that somehow got stored directly.
+        if "agent_configs" in d and d["agent_configs"]:
+            cleaned: dict[str, Any] = {}
+            for role, cfg in d["agent_configs"].items():
+                cleaned[role] = cfg if isinstance(cfg, dict) else vars(cfg)
+            d["agent_configs"] = cleaned
+        return d
 
     def save(self, config_path: str = _DEFAULT_CONFIG_PATH) -> None:
         """
@@ -230,6 +266,22 @@ def load_settings(
             + "\n".join(f"  • {e}" for e in errors)
         )
 
+    # --- Apply per-agent model config overrides (Phase 2C) ---
+    if settings.agent_configs:
+        try:
+            import importlib
+            _ac = importlib.import_module("src.config.agent_configs")
+            _ac.apply_overrides(settings.agent_configs)
+            logger.info(
+                "Applied agent_configs overrides for roles: %s",
+                list(settings.agent_configs.keys()),
+            )
+        except ImportError:
+            logger.warning(
+                "src.config.agent_configs not found — agent_configs overrides ignored. "
+                "Make sure src/config/agent_configs.py exists."
+            )
+
     return settings
 
 
@@ -289,4 +341,12 @@ def _build_settings(data: dict[str, Any]) -> Settings:
     # Only pass keys that are valid Settings fields.
     valid_keys = set(defaults_dict.keys())
     filtered = {k: v for k, v in data.items() if k in valid_keys}
-    return Settings(**{**defaults_dict, **filtered})
+    merged = {**defaults_dict, **filtered}
+    # agent_configs must be a dict; normalise if someone wrote a list by mistake.
+    if not isinstance(merged.get("agent_configs"), dict):
+        logger.warning(
+            "agent_configs in settings is not a dict (%r) — resetting to {}.",
+            type(merged.get("agent_configs")),
+        )
+        merged["agent_configs"] = {}
+    return Settings(**merged)

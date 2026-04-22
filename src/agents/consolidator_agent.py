@@ -33,38 +33,8 @@ import optuna
 from src.optimization import get_importances, get_best_params, get_dimension_stats
 from src.agents.base import AgentBase, AgentContext, AgentResult
 
-# The knowledge sub-package internally uses 'atwater.*' absolute imports,
-# which requires the *parent* of the atwater/ directory to be on sys.path.
-# We ensure that here without mutating sys.path globally in production —
-# the orchestrator is expected to run with both paths available.
-import sys as _sys
-import os as _os
-
-_atwater_parent = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))))
-if _atwater_parent not in _sys.path:
-    _sys.path.insert(0, _atwater_parent)
-
-try:
-    from atwater.src.knowledge.consolidator import ConsolidationEngine
-    from atwater.src.knowledge.models import KnowledgeEntry, KnowledgeTier
-except ImportError as _e:
-    # Last-ditch: import models.py directly (no atwater deps) and stub ConsolidationEngine
-    import importlib as _importlib
-    _models_path = _os.path.join(_os.path.dirname(__file__), "..", "knowledge", "models.py")
-    _spec = _importlib.util.spec_from_file_location("_kb_models", _models_path)
-    _mod = _importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-    KnowledgeEntry = _mod.KnowledgeEntry  # type: ignore[assignment]
-    KnowledgeTier = _mod.KnowledgeTier  # type: ignore[assignment]
-
-    class ConsolidationEngine:  # type: ignore[no-redef]
-        """Stub used when the full ConsolidationEngine cannot be imported."""
-        def run_consolidation(self, entries, current_cycle=0, embeddings=None):
-            import logging
-            logging.getLogger(__name__).warning(
-                "ConsolidationEngine stub in use — full engine not importable: %s", _e
-            )
-            return None
+from src.knowledge.consolidator import ConsolidationEngine
+from src.knowledge.models import KnowledgeEntry, KnowledgeTier
 
 logger = logging.getLogger(__name__)
 

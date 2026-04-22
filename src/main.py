@@ -17,10 +17,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os as _os
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+# Ensure the project root (parent of src/) is on sys.path so that
+# `from src.X import Y` works when running via `python3 src/main.py`.
+_project_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 # ---------------------------------------------------------------------------
 # Logging setup (before any project imports so all loggers inherit it)

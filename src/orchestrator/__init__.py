@@ -46,12 +46,21 @@ Typical workflow::
     print(result.score)
 """
 
-from .context_assembler import AgentContext, AgentResult, ContextAssembler
+from .context_assembler import (
+    OrchestratorContext,
+    OrchestratorResult,
+    AgentContext,   # backwards-compat alias for OrchestratorContext
+    AgentResult,    # backwards-compat alias for OrchestratorResult
+    ContextAssembler,
+)
 from .flow_controller import CycleResult, FlowController
 from .tool_loader import ToolLoader
 
 __all__ = [
-    # Types
+    # Canonical orchestrator-internal types
+    "OrchestratorContext",
+    "OrchestratorResult",
+    # Backwards-compatible aliases (OrchestratorContext / OrchestratorResult)
     "AgentContext",
     "AgentResult",
     "CycleResult",

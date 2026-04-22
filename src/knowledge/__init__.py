@@ -45,9 +45,9 @@ Typical workflow
     print(changelog)
 """
 
-from atwater.src.knowledge.clustering import TopicClusterer
-from atwater.src.knowledge.consolidator import ConsolidationEngine
-from atwater.src.knowledge.models import (
+from .clustering import TopicClusterer
+from .consolidator import ConsolidationEngine
+from .models import (
     TIER_RANK,
     KnowledgeEntry,
     KnowledgeTier,

@@ -1,5 +1,20 @@
 optuna>=3.6
+optunahub>=0.4
 sentence-transformers>=2.7
 scikit-learn>=1.4
 numpy>=1.26
 pandas>=2.2
+
+# Optional: ML-based evaluation gates (src/evaluation/medium_gate.py)
+# Install for aesthetic/quality scoring and CLIP-based alignment/novelty checks.
+# Without these, MediumGate passes with a warning and skips ML scoring.
+#
+# pyiqa>=0.1.12          # 50+ IQA metrics (NIMA, BRISQUE, MUSIQ, TOPIQ, etc.)
+# torch>=2.0             # Required by pyiqa
+# torchvision>=0.15      # Required by pyiqa
+# clip-by-openai>=1.0    # CLIP ViT-B/32 / ViT-L/14 for text-image alignment
+# Pillow>=10.0           # Image loading for medium gate
+#
+# To install all optional evaluation deps at once:
+#   pip install pyiqa torch torchvision clip-by-openai Pillow
+sqlite-vec>=0.1.6

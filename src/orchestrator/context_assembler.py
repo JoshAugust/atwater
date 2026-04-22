@@ -16,11 +16,13 @@ Design principles
 - **Lazy loading**: the sentence-transformers model for tool selection is
   loaded on first use only.
 
-AgentContext and AgentResult
------------------------------
-These are the primary data-transfer types between orchestrator and agents.
-Defined here because the orchestrator owns the assembly contract; agent
-implementations import from here (or from src.orchestrator).
+OrchestratorContext and OrchestratorResult
+------------------------------------------
+These are the orchestrator-internal types for context assembly and agent results.
+The canonical AgentContext/AgentResult that agents receive are defined in
+src.agents.base. OrchestratorContext is what the orchestrator builds internally
+before converting; OrchestratorResult is the richer result envelope used by the
+flow controller.
 """
 
 from __future__ import annotations
@@ -135,12 +137,14 @@ _AGENT_INSTRUCTIONS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 @dataclass
-class AgentContext:
+class OrchestratorContext:
     """
-    Fully assembled context package passed to an agent on each turn.
+    Fully assembled context package built by the orchestrator per turn.
 
-    Assembling this is the orchestrator's primary job. Every field maps
-    to one section of the per-turn prompt structure from ARCHITECTURE.md.
+    This is the orchestrator-internal type. It is assembled by ContextAssembler
+    and then converted to src.agents.base.AgentContext before being passed to
+    agents. Every field maps to one section of the per-turn prompt structure
+    from ARCHITECTURE.md.
 
     Attributes:
         role: Agent role name (e.g. "director", "grader").
@@ -222,10 +226,17 @@ class AgentContext:
         return "\n\n".join(self.to_prompt_sections())
 
 
+# Backwards-compatible alias — internal orchestrator code may use either name.
+AgentContext = OrchestratorContext
+
+
 @dataclass
-class AgentResult:
+class OrchestratorResult:
     """
-    Output returned by an agent after processing an AgentContext.
+    Richer result envelope used by the flow controller after an agent runs.
+
+    This is the orchestrator-internal type, distinct from
+    src.agents.base.AgentResult (which agents return directly).
 
     Attributes:
         role: Agent role that produced this result.
@@ -244,6 +255,10 @@ class AgentResult:
     cycle_number: int
     success: bool = True
     error: str | None = None
+
+
+# Backwards-compatible alias.
+AgentResult = OrchestratorResult
 
 
 # ---------------------------------------------------------------------------

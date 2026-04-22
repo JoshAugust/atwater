@@ -24,7 +24,7 @@ import numpy as np
 from sklearn.cluster import HDBSCAN
 
 if TYPE_CHECKING:
-    from atwater.src.knowledge.models import KnowledgeEntry
+    from .models import KnowledgeEntry
 
 logger = logging.getLogger(__name__)
 

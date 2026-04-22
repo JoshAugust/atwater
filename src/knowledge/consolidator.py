@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from atwater.src.knowledge.models import (
+from .models import (
     KnowledgeEntry,
     KnowledgeTier,
     PromotionCriteria,
@@ -167,7 +167,7 @@ class ConsolidationEngine:
             active_indices = [i for i, e in enumerate(knowledge_base) if e.is_active]
             active_embeddings = embeddings[active_indices]
 
-            from atwater.src.knowledge.clustering import TopicClusterer
+            from .clustering import TopicClusterer
             clusterer = TopicClusterer()
             clusters = clusterer.cluster_entries(active_after_demote, active_embeddings)
 
@@ -545,7 +545,7 @@ class ConsolidationEngine:
         Choose the tier for the merged entry: the highest tier among all sources,
         capped at *pattern* (a merge of observations cannot become a rule directly).
         """
-        from atwater.src.knowledge.models import TIER_RANK
+        from .models import TIER_RANK
         best = max(entries, key=lambda e: TIER_RANK[e.tier])
         # Merging can produce at most a pattern; rules are formed through
         # individual promotion via PromotionCriteria.

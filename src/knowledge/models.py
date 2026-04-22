@@ -84,9 +84,17 @@ class KnowledgeEntry:
     optuna_evidence: dict | None = None
     topic_cluster: str = "unclustered"
     lineage: list[str] = field(default_factory=list)
+    embedding: bytes | None = field(default=None, repr=False)
 
     # id last so callers can omit it and get an auto-generated UUID
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def embedding_array(self):
+        """Decode the stored embedding bytes back to a float32 numpy array."""
+        if self.embedding is None:
+            return None
+        import numpy as np  # lazy import — avoid hard dep in pure-model module
+        return np.frombuffer(self.embedding, dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Convenience helpers

@@ -50,11 +50,13 @@ import json
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+# Canonical KnowledgeEntry lives in src.knowledge.models (merged definition).
+from src.knowledge.models import KnowledgeEntry  # noqa: F401 — re-exported via __init__
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -69,34 +71,6 @@ RULES_STOP_THRESHOLD: float = 0.75
 
 # Sentence-transformers model name for embeddings.
 EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
-
-
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class KnowledgeEntry:
-    """A single entry in the knowledge base."""
-
-    id: str
-    content: str
-    tier: str  # "rule" | "pattern" | "observation"
-    confidence: float  # 0.0 – 1.0
-    created_cycle: int
-    last_validated_cycle: int
-    validation_count: int
-    contradicted_by: list[str]      # list of entry IDs that contradict this one
-    optuna_evidence: dict[str, Any] | None
-    topic_cluster: str
-    embedding: bytes | None = field(repr=False)  # raw float32 bytes (numpy)
-
-    def embedding_array(self) -> np.ndarray | None:
-        """Decode the stored embedding bytes back to a float32 numpy array."""
-        if self.embedding is None:
-            return None
-        return np.frombuffer(self.embedding, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------

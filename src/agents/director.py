@@ -33,7 +33,7 @@ from typing import Any
 
 import optuna
 
-from src.optimization import TrialAdapter, get_best_params
+from src.optimization import DEFAULT_SEARCH_SPACE, TrialAdapter, get_best_params
 from src.agents.base import AgentBase, AgentContext, AgentResult
 
 logger = logging.getLogger(__name__)
@@ -136,8 +136,8 @@ class DirectorEngine(AgentBase):
     def _suggest_from_optuna(self) -> dict[str, Any]:
         """Ask Optuna's sampler for the next parameter combination."""
         trial = self._study.ask()
-        adapter = TrialAdapter(trial, self._search_space)
-        params = adapter.suggest_all()
+        adapter = TrialAdapter(trial)
+        params = adapter.suggest_params(self._search_space or DEFAULT_SEARCH_SPACE)
         return {
             "trial_number": trial.number,
             "params": params,
@@ -173,8 +173,8 @@ class DirectorEngine(AgentBase):
 
         # Ask Optuna to fill remaining params (partial fixed params)
         trial = self._study.ask(fixed_distributions=self._build_fixed_distributions(param_hints))
-        adapter = TrialAdapter(trial, self._search_space)
-        params = adapter.suggest_all()
+        adapter = TrialAdapter(trial)
+        params = adapter.suggest_params(self._search_space or DEFAULT_SEARCH_SPACE)
 
         # Overwrite with the KB hints so the specific combo is actually tested
         params.update(param_hints)
